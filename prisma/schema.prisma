@@ -1,0 +1,569 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Role {
+  DEFAULT
+  ADMIN
+}
+
+model User {
+  id        Int      @id @default(autoincrement())
+  email     String   @unique
+  name      String?
+  password  String
+  role      Role     @default(DEFAULT)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  // Связь с дружбами
+  friendshipsSent     Friendship[] @relation("UserFriendships")
+  friendshipsReceived Friendship[] @relation("FriendOf")
+
+  progressEntries ProgressEntry[] @relation("ProgressActorEntries")
+  tasks           Task[]          @relation("UserTasks")
+
+  telegramChatId     String?
+  telegramEnabled    Boolean             @default(false)
+  notifications      Notification[]
+  telegramLinkTokens TelegramLinkToken[]
+
+  // --- Gamification fields (added) ---
+  xp                  Int       @default(0)
+  level               Int       @default(1)
+  streak              Int       @default(0)
+  lastStreakDate      DateTime?
+  totalCompletedTasks Int       @default(0)
+  achievementsCount   Int       @default(0)
+
+  // relations for gamification
+  userAchievements        UserAchievement[]
+  pointsTransactions      PointsTransaction[]
+  userBadges              UserBadge[]
+  gamificationEvents      GamificationEvent[]
+  challengeParticipations ChallengeParticipant[]
+  achievementProgresses   AchievementProgress[]
+  userStreak              UserStreak?
+  leaderboardEntries      LeaderboardEntry[]
+  activityFeedItems       ActivityFeedItem[]
+  taskInstances           TaskInstance[]
+}
+
+model Notification {
+  id Int @id @default(autoincrement())
+
+  user   User @relation(fields: [userId], references: [id])
+  userId Int
+
+  task   Task @relation(fields: [taskId], references: [id])
+  taskId Int
+
+  schedule   TaskSchedule? @relation(fields: [scheduleId], references: [id])
+  scheduleId Int?
+
+  channel NotificationChannel @default(TELEGRAM)
+  type    NotificationType
+
+  offsetMinutes  Int?
+  cronExpression String?
+
+  progressPercent Float?
+  noProgressDays  Int?
+
+  isEnabled       Boolean   @default(true)
+  lastTriggeredAt DateTime?
+  createdAt       DateTime  @default(now())
+
+  @@index([taskId])
+  @@index([userId])
+  @@index([scheduleId])
+}
+
+enum NotificationChannel {
+  TELEGRAM
+}
+
+enum NotificationType {
+  BEFORE_RUN // за X минут до
+  AT_RUN // в момент
+  AFTER_RUN // после выполнения
+  DEADLINE // дедлайн
+  OVERDUE // просрочена
+  PROGRESS_REACHED // достигнут %
+  NO_PROGRESS // нет прогресса N дней
+}
+
+model Friendship {
+  id        Int              @id @default(autoincrement())
+  user      User             @relation("UserFriendships", fields: [userId], references: [id])
+  userId    Int
+  friend    User             @relation("FriendOf", fields: [friendId], references: [id])
+  friendId  Int
+  status    FriendshipStatus @default(pending)
+  createdAt DateTime         @default(now())
+  updatedAt DateTime         @updatedAt
+
+  @@unique([userId, friendId]) // чтобы нельзя было создать дублирующее отношение
+}
+
+enum FriendshipStatus {
+  pending
+  accepted
+  blocked
+  rejected
+}
+
+enum TaskType {
+  ONCE
+  SCHEDULED // task has one or more schedules in TaskSchedule
+  DEADLINE // one-time with scheduledFor
+  PROGRESSIVE // tasks that track progress (target + entries)
+}
+
+enum TaskStatus {
+  pending
+  inProgress
+  done
+  cancelled
+}
+
+model TaskInstance {
+  id           Int                @id @default(autoincrement())
+  task         Task               @relation(fields: [taskId], references: [id])
+  taskId       Int
+  schedule     TaskSchedule?      @relation(fields: [scheduleId], references: [id])
+  scheduleId   Int?
+  occurrenceAt DateTime // когда именно запланировано (начало/время)
+  dueAt        DateTime? // optional, для дедлайнов
+  status       TaskInstanceStatus @default(pending)
+  createdById  Int? // кто создал (system/user)
+  createdBy    User?              @relation(fields: [createdById], references: [id])
+  completedAt  DateTime?
+  attempt      Int                @default(0) // на случай повторов/повторных попыток
+  meta         Json?
+  createdAt    DateTime           @default(now())
+  updatedAt    DateTime           @default(now()) @updatedAt
+
+  progressEntries ProgressEntry[] @relation("ProgressEntryToTaskInstance")
+
+  // индекс для быстрых запросов по задаче/дате/статусу
+  @@index([taskId])
+  @@index([scheduleId])
+  @@index([occurrenceAt])
+}
+
+enum TaskInstanceStatus {
+  pending
+  inProgress
+  done
+  failed // отмечено как провалено пользователем/системой
+  missed // дедлайн прошёл, никто не сделал — автоматически помечается
+  cancelled
+}
+
+model Task {
+  id          Int        @id @default(autoincrement())
+  title       String
+  description String?
+  type        TaskType   @default(ONCE)
+  status      TaskStatus @default(pending)
+  priority    Int        @default(0)
+  owner       User?      @relation("UserTasks", fields: [ownerId], references: [id])
+  ownerId     Int?
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  // for DEADLINE / ONCE: optional single date
+  scheduledFor DateTime?
+
+  // for SCHEDULED: 0..N schedules
+  schedules TaskSchedule[]
+
+  // for hierarchical tasks
+  parentId Int?
+  parent   Task?  @relation("Subtasks", fields: [parentId], references: [id])
+  subtasks Task[] @relation("Subtasks")
+
+  // many-to-many self relation for links between tasks
+  linkedTasks Task[] @relation("TaskLinks")
+  linkedFrom  Task[] @relation("TaskLinks")
+
+  // progress stuff
+  // if task uses progressive mode, metadata describing target
+  progressMeta TaskProgress? // one-to-one optional
+
+  // all incremental entries (history)
+  progressEntries ProgressEntry[]
+
+  notifications Notification[]
+  // convenience: if you want multiple progress "targets" per task, use TaskProgress model separate (we use 1:1 here)
+  taskInstances TaskInstance[]
+}
+
+model TaskSchedule {
+  id             Int       @id @default(autoincrement())
+  task           Task      @relation(fields: [taskId], references: [id])
+  taskId         Int
+  type           TaskType // ONCE | DAILY | WEEKLY | MONTHLY | CRON - but typically SCHEDULED with subtype
+  // example fields:
+  // for once
+  runAt          DateTime?
+  // for daily/weekly/monthly
+  timeOfDay      String? // 'HH:MM'
+  daysOfWeek     Int[] // use 1..7, optional: empty array means every day (store [] if supported)
+  dayOfMonth     Int?
+  // for cron
+  cronExpression String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  notifications Notification[]
+  taskInstances TaskInstance[]
+}
+
+///// Progress models /////
+
+/**
+ * TaskProgress: metadata/target for a progressive task.
+ * Examples:
+ * - target = 20000, unit = "steps", aggregation = "per_day" (meaning daily goal)
+ * - target = 100, unit = "pages", aggregation = "total" (complete overall)
+ * - isCumulative: whether entries accumulate until target reached (true) or last entry is the current value (false)
+ */
+model TaskProgress {
+  id           Int                 @id @default(autoincrement())
+  task         Task                @relation(fields: [taskId], references: [id])
+  taskId       Int                 @unique
+  // target value to reach (nullable if open-ended)
+  targetValue  Float?
+  // unit label, e.g. "steps", "pages", "points"
+  unit         String?
+  // how to aggregate entries: DAILY / TOTAL / LATEST
+  aggregation  ProgressAggregation @default(TOTAL)
+  // if aggregation==DAILY, progress resets per day (date-based) — then entries grouped by day
+  isCumulative Boolean             @default(true)
+  createdAt    DateTime            @default(now())
+  updatedAt    DateTime            @updatedAt
+
+  entries ProgressEntry[] @relation("ProgressEntriesForTaskProgress")
+}
+
+enum ProgressAggregation {
+  TOTAL // accumulate all entries toward target (ever)
+  DAILY // accumulate per day (reset each day)
+  LATEST // the latest entry is the value (not cumulative)
+}
+
+/**
+ * ProgressEntry: each addition/report of progress by user (or system).
+ * - amount: positive (add) or negative (subtract)
+ * - optional context: note, associated schedule instance date, or linked task schedule id
+ * - optional actor: user who reported (useful if multiple people)
+ */
+model ProgressEntry {
+  id             Int           @id @default(autoincrement())
+  task           Task          @relation(fields: [taskId], references: [id])
+  taskId         Int
+  taskInstanceId Int?
+  taskProgress   TaskProgress? @relation("ProgressEntriesForTaskProgress", fields: [taskProgressId], references: [id])
+  taskProgressId Int?
+  actor          User?         @relation("ProgressActorEntries", fields: [actorId], references: [id])
+  actorId        Int?
+  amount         Float
+  groupDate      DateTime?
+  note           String?
+  createdAt      DateTime      @default(now())
+
+  taskInstance TaskInstance? @relation("ProgressEntryToTaskInstance", fields: [taskInstanceId], references: [id])
+}
+
+model TelegramLinkToken {
+  id        Int       @id @default(autoincrement())
+  token     String    @unique
+  userId    Int
+  user      User      @relation(fields: [userId], references: [id])
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([token])
+}
+
+// ---------- Gamification & Achievements models (NEW) ----------
+
+// Types of events that the gamification system listens to
+enum GamificationEventType {
+  TODO_CREATED
+  TODO_COMPLETED
+  PROGRESS_REPORTED
+  AI_SUGGESTION_USED
+  LOGIN
+  DAILY_ACTIVE
+  CHALLENGE_COMPLETED
+}
+
+// Reason for points transactions
+enum PointsReason {
+  TODO_COMPLETED
+  ACHIEVEMENT_UNLOCKED
+  STREAK_BONUS
+  MANUAL_ADJUSTMENT
+  CHALLENGE_REWARD
+}
+
+// Animation / asset types for badges
+enum AnimationType {
+  LOTTIE
+  SPRITE_SHEET
+  GIF
+  STATIC
+}
+
+// Achievement category/type
+enum AchievementType {
+  ONE_TIME
+  REPEATABLE
+  SEASONAL
+  CHALLENGE
+}
+
+model Achievement {
+  id           Int             @id @default(autoincrement())
+  code         String          @unique
+  title        String
+  description  String?
+  type         AchievementType @default(ONE_TIME)
+  xpReward     Int? // XP granted when unlocked
+  pointsReward Int? // optional currency/points
+  isHidden     Boolean         @default(false)
+  isActive     Boolean         @default(true)
+  createdAt    DateTime        @default(now())
+  updatedAt    DateTime        @updatedAt
+
+  // relation to asset/animation
+  badge   Badge? @relation(fields: [badgeId], references: [id])
+  badgeId Int?
+
+  criteria              AchievementCriterion[]
+  userAchievements      UserAchievement[]
+  achievementProgresses AchievementProgress[]
+}
+
+model AchievementCriterion {
+  id            Int         @id @default(autoincrement())
+  achievement   Achievement @relation(fields: [achievementId], references: [id])
+  achievementId Int
+
+  // type of criterion (you can extend as needed)
+  // examples: COMPLETE_TASKS, STREAK_DAYS, USE_FEATURE, COMPLETE_TASK_WITH_TAG, PROGRESS_TARGET
+  type String
+
+  // params we need to evaluate the rule, stored as JSON, e.g. {"target":10, "tag":"onboarding"}
+  params Json
+
+  // whether this criterion must be satisfied (default true)
+  isRequired            Boolean               @default(true)
+  createdAt             DateTime              @default(now())
+  updatedAt             DateTime              @default(now())
+  achievementProgresses AchievementProgress[]
+}
+
+// A record of a user unlocking an achievement (one row per unlock). If achievement is non-repeatable, unique constraint prevents duplicates.
+model UserAchievement {
+  id            Int         @id @default(autoincrement())
+  user          User        @relation(fields: [userId], references: [id])
+  userId        Int
+  achievement   Achievement @relation(fields: [achievementId], references: [id])
+  achievementId Int
+  unlockedAt    DateTime    @default(now())
+  // snapshot: store relevant stats when unlocked
+  snapshot      Json?
+
+  // For repeatable achievements we may want to store timesUnlocked or allow multiple rows. We support both.
+  timesUnlocked Int @default(1)
+
+  @@unique([userId, achievementId], map: "unique_user_achievement")
+  @@index([userId])
+  @@index([achievementId])
+}
+
+model Badge {
+  id          Int             @id @default(autoincrement())
+  code        String          @unique
+  title       String
+  description String?
+  icon        String? // URL or asset key
+  animation   BadgeAnimation? @relation(fields: [badgeAnimationId], references: [id])
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+
+  userBadges       UserBadge[]
+  achievements     Achievement[]
+  badgeAnimationId Int?
+  challenges       Challenge[]
+}
+
+model BadgeAnimation {
+  id        Int           @id @default(autoincrement())
+  type      AnimationType @default(LOTTIE)
+  // store either a path to the Lottie JSON, sprite metadata, or binary key in CDN
+  asset     String
+  metadata  Json?
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+  badges    Badge[]
+}
+
+// When an achievement yields a badge, user badge is recorded separately (visualized on front)
+model UserBadge {
+  id             Int      @id @default(autoincrement())
+  user           User     @relation(fields: [userId], references: [id])
+  userId         Int
+  badge          Badge    @relation(fields: [badgeId], references: [id])
+  badgeId        Int
+  earnedAt       DateTime @default(now())
+  // animation state: e.g. not_shown / shown / dismissed
+  animationState String   @default("not_shown")
+  meta           Json?
+
+  @@unique([userId, badgeId])
+}
+
+// XP / points transaction log. Keep immutable ledger for auditing and rollback.
+model PointsTransaction {
+  id            Int          @id @default(autoincrement())
+  user          User         @relation(fields: [userId], references: [id])
+  userId        Int
+  amount        Int
+  reason        PointsReason
+  // reference to related entity (taskId, achievementId, challengeId etc.)
+  referenceId   Int?
+  referenceType String?
+  metadata      Json?
+  createdAt     DateTime     @default(now())
+
+  @@index([userId])
+}
+
+// Track incremental progress toward multi-step achievements
+model AchievementProgress {
+  id            Int                   @id @default(autoincrement())
+  user          User                  @relation(fields: [userId], references: [id])
+  userId        Int
+  achievement   Achievement           @relation(fields: [achievementId], references: [id])
+  achievementId Int
+  criterion     AchievementCriterion? @relation(fields: [criterionId], references: [id])
+  criterionId   Int?
+
+  // numeric progress value, e.g. 3 of 10
+  progress     Float    @default(0)
+  progressMeta Json?
+  updatedAt    DateTime @updatedAt
+
+  @@unique([userId, achievementId, criterionId], map: "unique_user_ach_progress")
+}
+
+// Streaks (daily activity / consecutive days)
+model UserStreak {
+  id            Int       @id @default(autoincrement())
+  user          User      @relation(fields: [userId], references: [id])
+  userId        Int       @unique
+  currentStreak Int       @default(0)
+  bestStreak    Int       @default(0)
+  lastActiveAt  DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @default(now())
+}
+
+// Challenges (missions) - timeboxed objectives that can grant rewards
+model Challenge {
+  id           Int       @id @default(autoincrement())
+  code         String    @unique
+  title        String
+  description  String?
+  // JSON rule set or references to AchievementCriteria
+  criteria     Json
+  startAt      DateTime?
+  endAt        DateTime?
+  xpReward     Int?
+  pointsReward Int?
+  badgeId      Int?
+  badge        Badge?    @relation(fields: [badgeId], references: [id])
+  isActive     Boolean   @default(true)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @default(now())
+
+  participants ChallengeParticipant[]
+}
+
+model ChallengeParticipant {
+  id          Int       @id @default(autoincrement())
+  challenge   Challenge @relation(fields: [challengeId], references: [id])
+  challengeId Int
+  user        User      @relation(fields: [userId], references: [id])
+  userId      Int
+  joinedAt    DateTime  @default(now())
+  progress    Json?
+  completedAt DateTime?
+
+  @@unique([challengeId, userId])
+  @@index([userId])
+}
+
+// Event queue / audit for gamification processing (useful for idempotency & async workers)
+model GamificationEvent {
+  id          Int                   @id @default(autoincrement())
+  type        GamificationEventType
+  user        User?                 @relation(fields: [userId], references: [id])
+  userId      Int?
+  payload     Json // event payload (taskId, amount, etc)
+  processed   Boolean               @default(false)
+  error       String?
+  createdAt   DateTime              @default(now())
+  processedAt DateTime?
+
+  @@index([type])
+  @@index([userId])
+}
+
+// Leaderboard cache for fast reads (optional, materialized periodically)
+model LeaderboardEntry {
+  id        Int      @id @default(autoincrement())
+  period    String // e.g. "all_time" | "week_2025-01-12"
+  user      User     @relation(fields: [userId], references: [id])
+  userId    Int
+  score     Int
+  rank      Int
+  createdAt DateTime @default(now())
+
+  @@index([period])
+  @@index([userId])
+}
+
+// Misc: activity feed entries (for UI timeline of achievements)
+model ActivityFeedItem {
+  id        Int      @id @default(autoincrement())
+  user      User     @relation(fields: [userId], references: [id])
+  userId    Int
+  type      String
+  body      Json
+  isPublic  Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+// ---------- End of gamification schema ----------
+
+model Level {
+  id        Int      @id @default(autoincrement())
+  level     Int      @unique
+  xpNeeded  Int // суммарный XP, необходимый чтобы достичь уровня
+  title     String? // опционально, отображаемое название уровня
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
