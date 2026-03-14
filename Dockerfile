@@ -7,7 +7,7 @@ RUN yarn install --frozen-lockfile
 
 COPY . .
 
-RUN npx prisma generate
+RUN yarn prisma
 RUN yarn build
 
 FROM node:20-alpine
