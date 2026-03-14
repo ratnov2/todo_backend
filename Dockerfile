@@ -13,16 +13,8 @@ RUN yarn install --frozen-lockfile
 # Копируем проект
 COPY . .
 
-# -----------------------------
-# Prisma Client: генерируем без настоящего DATABASE_URL
-# Можно использовать stub, чтобы build проходил
-# -----------------------------
-ARG DATABASE_URL_LOCAL="postgresql://localhost:5432/stub"
-ENV DATABASE_URL_LOCAL=$DATABASE_URL_LOCAL
-RUN node prisma.config.js
-
 # Билдим NestJS проект
-RUN yarn build
+RUN yarn build --force
 
 
 # ---------- PRODUCTION ----------
