@@ -7,7 +7,6 @@ RUN yarn install --frozen-lockfile
 
 COPY . .
 
-RUN yarn prisma
 RUN yarn build
 
 FROM node:20-alpine
@@ -20,4 +19,4 @@ COPY --from=builder /app/prisma ./prisma
 
 EXPOSE 3000
 
-CMD ["node", "dist/main.js"]
+CMD ["sh", "-c", "npx prisma generate && node dist/main.js"]
