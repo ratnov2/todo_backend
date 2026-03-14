@@ -19,7 +19,7 @@ COPY . .
 # -----------------------------
 ARG DATABASE_URL_LOCAL="postgresql://localhost:5432/stub"
 ENV DATABASE_URL_LOCAL=$DATABASE_URL_LOCAL
-RUN npx ts-node prisma.config.ts
+RUN node prisma.config.js
 
 # Билдим NestJS проект
 RUN yarn build
