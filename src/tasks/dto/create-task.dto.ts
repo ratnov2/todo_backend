@@ -6,8 +6,12 @@ import {
   IsISO8601,
   IsOptional,
   IsString,
+  ValidateNested,
 } from 'class-validator';
 import { CreateScheduleDto } from './create-schedule.dto';
+import { Type } from 'class-transformer';
+import { CreateProgressEntryDto } from './create-progress-entry.dto';
+import { CreateTaskProgressDto } from './create-progress-meta.dto';
 
 export class CreateTaskDto {
   @IsString({ message: 'Field title is required' })
@@ -55,4 +59,16 @@ export class CreateTaskDto {
 
   @IsOptional()
   schedule?: CreateScheduleDto;
+
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => CreateTaskProgressDto)
+  @ApiPropertyOptional({ type: CreateTaskProgressDto })
+  progress?: CreateTaskProgressDto;
+
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => CreateProgressEntryDto)
+  @ApiPropertyOptional({ type: CreateProgressEntryDto })
+  progressEntry?: CreateProgressEntryDto;
 }

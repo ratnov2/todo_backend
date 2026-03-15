@@ -19,7 +19,7 @@ import {
   PaginatedResource,
   Pagination,
 } from 'src/decorator/pagination.decorator';
-import { TaskQueryFilterDto } from './dto/task-filter.dto';
+import { TaskQueryFilterDto, TaskSort } from './dto/task-filter.dto';
 import { userSelect } from 'src/users/select/user.select';
 import { taskSelect } from './select/task.select';
 import { CreateScheduleDto } from './dto/create-schedule.dto';
@@ -80,6 +80,50 @@ export class TasksService {
             },
           });
         }
+      }
+
+      if (createDto.progress) {
+        await tx.taskProgress.upsert({
+          where: { taskId: task.id },
+          update: {
+            targetValue: createDto.progress.targetValue ?? undefined,
+            unit: createDto.progress.unit ?? undefined,
+            aggregation: createDto.progress.aggregation ?? undefined,
+            isCumulative: createDto.progress.isCumulative ?? undefined,
+          },
+          create: {
+            task: { connect: { id: task.id } },
+            targetValue: createDto.progress.targetValue,
+            unit: createDto.progress.unit,
+            aggregation: createDto.progress.aggregation,
+            isCumulative: createDto.progress.isCumulative ?? true,
+          },
+        });
+      }
+
+      if (createDto.progressEntry) {
+        const progress = await tx.taskProgress.upsert({
+          where: { taskId: task.id },
+          update: {},
+          create: {
+            task: { connect: { id: task.id } },
+          },
+        });
+
+        await tx.progressEntry.create({
+          data: {
+            task: { connect: { id: task.id } },
+            taskProgress: { connect: { id: progress.id } },
+            amount: createDto.progressEntry.amount,
+            actor: {
+              connect: { id: createDto.progressEntry.actorId ?? ownerId },
+            },
+            note: createDto.progressEntry.note ?? null,
+            groupDate: createDto.progressEntry.groupDate
+              ? new Date(createDto.progressEntry.groupDate)
+              : null,
+          },
+        });
       }
 
       return task;
@@ -157,6 +201,18 @@ export class TasksService {
 
     const where: Prisma.TaskWhereInput = { ownerId };
 
+    const orderBy: Prisma.TaskOrderByWithRelationInput[] = [];
+
+    orderBy.push({
+      status: 'asc', // если DONE последний в enum
+    });
+
+    if (query.sort === TaskSort.OLDEST) {
+      orderBy.push({ id: 'asc' });
+    } else {
+      orderBy.push({ id: 'desc' });
+    }
+
     if (query.status) where.status = { in: query.status };
     if (query.type) where.type = { in: query.type };
     if (query.ownerId) where.ownerId = { in: query.ownerId };
@@ -175,7 +231,7 @@ export class TasksService {
           parentId: true,
           owner: { select: { id: true } },
         },
-        orderBy: { id: 'desc' },
+        orderBy,
       }),
       this.db.task.count({ where }),
     ]);
@@ -215,14 +271,6 @@ export class TasksService {
       },
       orderBy: { occurrenceAt: 'asc' },
     });
-
-    console.log(
-      await this.db.taskInstance.findMany({
-        where: {
-          taskId: 2114,
-        },
-      }),
-    );
 
     // 5) Создаём карту: taskId → ближайший instance
     const instanceMap = new Map<number, TaskInstance>();
