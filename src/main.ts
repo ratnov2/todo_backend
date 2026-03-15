@@ -10,6 +10,8 @@ async function bootstrap() {
 
   app.use(cookieParser());
 
+  app.setGlobalPrefix('api');
+
   app.enableCors({
     origin: process.env.CORS_ORIGIN?.split(',') || 'http://localhost:3000',
     credentials: true,
