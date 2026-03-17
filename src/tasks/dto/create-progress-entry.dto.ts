@@ -14,6 +14,15 @@ export class CreateProgressEntryDto {
 
   @IsOptional()
   @IsInt()
+  @ApiPropertyOptional({
+    example: 138,
+    description:
+      'Task instance ID (bind progress to currentInstance when provided)',
+  })
+  taskInstanceId?: number;
+
+  @IsOptional()
+  @IsInt()
   @ApiPropertyOptional({ example: 1, description: 'Actor ID' })
   actorId?: number;
 

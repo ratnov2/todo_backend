@@ -186,7 +186,7 @@ export class TasksController {
   }
 
   private checkedTasks() {
-    cron.schedule('*/5 * * * *', async () => {
+    cron.schedule('*/5 * * * * *', async () => {
       console.log('checkedTasks');
       await this.tasksService.markMissedInstances();
     });

@@ -51,6 +51,8 @@ export class TasksService {
         },
       });
 
+      let instance: TaskInstance | null = null;
+
       if (createDto.schedule) {
         const schedule = await tx.taskSchedule.create({
           data: {
@@ -67,10 +69,9 @@ export class TasksService {
         });
 
         const next = computeNextOccurrence(schedule, new Date());
-        console.log(next);
 
         if (next) {
-          await tx.taskInstance.create({
+          instance = await tx.taskInstance.create({
             data: {
               task: { connect: { id: task.id } },
               schedule: { connect: { id: schedule.id } },
@@ -114,6 +115,9 @@ export class TasksService {
           data: {
             task: { connect: { id: task.id } },
             taskProgress: { connect: { id: progress.id } },
+            taskInstance: instance
+              ? { connect: { id: instance.id } }
+              : undefined,
             amount: createDto.progressEntry.amount,
             actor: {
               connect: { id: createDto.progressEntry.actorId ?? ownerId },
@@ -196,16 +200,14 @@ export class TasksService {
     pagination: Pagination,
     query: TaskQueryFilterDto,
     ownerId: number,
-  ): Promise<PaginatedResource<Partial<Task>>> {
+  ): Promise<PaginatedResource<any>> {
     const { limit, offset, page, size } = pagination;
 
     const where: Prisma.TaskWhereInput = { ownerId };
 
     const orderBy: Prisma.TaskOrderByWithRelationInput[] = [];
 
-    orderBy.push({
-      status: 'asc', // если DONE последний в enum
-    });
+    orderBy.push({ status: 'asc' });
 
     if (query.sort === TaskSort.OLDEST) {
       orderBy.push({ id: 'asc' });
@@ -236,16 +238,16 @@ export class TasksService {
       this.db.task.count({ where }),
     ]);
 
-    // 🔥 собираем дерево любой глубины
+    // 🌳 строим дерево
     const tree = this.buildTaskTree(flatItems);
 
-    // пагинация ТОЛЬКО по корневым задачам
     const paginatedRoots = tree.slice(offset, offset + limit);
 
-    if (!paginatedRoots.length)
+    if (!paginatedRoots.length) {
       return { items: paginatedRoots, totalItems, page, size };
+    }
 
-    // 3) Собираем все taskIds из корневых задач + потомков
+    // 📦 собираем все taskIds
     const collectTaskIds = (nodes: any[]): number[] => {
       const ids: number[] = [];
       const stack = [...nodes];
@@ -253,40 +255,81 @@ export class TasksService {
         const n = stack.pop();
         if (!n) continue;
         if (typeof n.id === 'number') ids.push(n.id);
-        if (Array.isArray(n.children) && n.children.length)
-          stack.push(...n.children);
+        if (Array.isArray(n.children)) stack.push(...n.children);
       }
       return ids;
     };
+
     const taskIds = collectTaskIds(paginatedRoots);
 
     const now = new Date();
 
-    // 4) Получаем **только один ближайший instance на задачу**
-
+    // 🔥 1. Получаем ближайшие instance
     const instances = await this.db.taskInstance.findMany({
       where: {
         taskId: { in: taskIds },
-        occurrenceAt: { gte: now }, // будущие instance
+        occurrenceAt: { gte: now },
       },
       orderBy: { occurrenceAt: 'asc' },
     });
 
-    // 5) Создаём карту: taskId → ближайший instance
+    // 🔥 2. Map: taskId → instance
     const instanceMap = new Map<number, TaskInstance>();
+
     for (const inst of instances) {
       if (!instanceMap.has(inst.taskId)) {
-        instanceMap.set(inst.taskId, inst); // берём **первый (ближайший)**
+        instanceMap.set(inst.taskId, inst);
       }
     }
 
-    // 6) Привязываем instance к дереву рекурсивно
+    // 🔥 3. Собираем instanceIds
+    const instanceIds = Array.from(instanceMap.values()).map((i) => i.id);
+
+    // 🔥 4. Загружаем progressEntries ТОЛЬКО для instance
+    const entries = instanceIds.length
+      ? await this.db.progressEntry.findMany({
+          where: {
+            taskInstanceId: { in: instanceIds },
+          },
+        })
+      : [];
+
+    // 🔥 5. Группируем: instanceId → entries[]
+    const entriesMap = new Map<number, typeof entries>();
+
+    for (const e of entries) {
+      if (!e.taskInstanceId) continue;
+      if (!entriesMap.has(e.taskInstanceId)) {
+        entriesMap.set(e.taskInstanceId, []);
+      }
+      entriesMap.get(e.taskInstanceId)!.push(e);
+    }
+
+    // 🔥 6. Рекурсивно собираем результат
     const attachCurrentInstance = (node: any) => {
       const id = node.id as number | undefined;
-      node.currentInstance = id ? (instanceMap.get(id) ?? null) : null;
-      if (Array.isArray(node.children))
+      const instance = id ? instanceMap.get(id) : null;
+
+      if (instance) {
+        const instEntries = entriesMap.get(instance.id) ?? [];
+
+        // 💡 можно сразу посчитать прогресс
+        const total = instEntries.reduce((sum, e) => sum + e.amount, 0);
+
+        node.currentInstance = {
+          ...instance,
+          progressEntries: instEntries,
+          progressTotal: total, // 🔥 удобно для фронта
+        };
+      } else {
+        node.currentInstance = null;
+      }
+
+      if (Array.isArray(node.children)) {
         node.children.forEach(attachCurrentInstance);
+      }
     };
+
     paginatedRoots.forEach(attachCurrentInstance);
 
     return { items: paginatedRoots, totalItems, page, size };
@@ -513,10 +556,26 @@ export class TasksService {
     dto: CreateProgressEntryDto,
   ): Promise<ProgressEntry> {
     await this.ensureTaskExists(taskId);
-    // make sure task has TaskProgress if taskProgressId provided or task is progressive
+
+    if (dto.taskInstanceId) {
+      const instance = await this.db.taskInstance.findUnique({
+        where: { id: dto.taskInstanceId },
+        select: { id: true, taskId: true },
+      });
+      if (!instance) {
+        throw new NotFoundException('Task instance not found');
+      }
+      if (instance.taskId !== taskId) {
+        throw new BadRequestException('Task instance does not belong to task');
+      }
+    }
+
     const entry = await this.db.progressEntry.create({
       data: {
         task: { connect: { id: taskId } },
+        taskInstance: dto.taskInstanceId
+          ? { connect: { id: dto.taskInstanceId } }
+          : undefined,
         amount: dto.amount,
         actor: dto.actorId ? { connect: { id: dto.actorId } } : undefined,
         groupDate: dto.groupDate ? new Date(dto.groupDate) : undefined,
