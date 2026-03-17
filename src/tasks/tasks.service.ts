@@ -207,15 +207,20 @@ export class TasksService {
 
     const orderBy: Prisma.TaskOrderByWithRelationInput[] = [];
 
-    orderBy.push({ status: 'asc' });
-
     if (query.sort === TaskSort.OLDEST) {
       orderBy.push({ id: 'asc' });
     } else {
       orderBy.push({ id: 'desc' });
     }
 
-    if (query.status) where.status = { in: query.status };
+    const filteredStatuses = query.status
+      ? query.status.filter((s) => s !== 'cancelled')
+      : undefined;
+
+    where.status = filteredStatuses?.length
+      ? { in: filteredStatuses }
+      : { not: 'cancelled' };
+
     if (query.type) where.type = { in: query.type };
     if (query.ownerId) where.ownerId = { in: query.ownerId };
     if (query.q) {
@@ -237,6 +242,21 @@ export class TasksService {
       }),
       this.db.task.count({ where }),
     ]);
+
+    flatItems.sort((a, b) => {
+      const aDone = a.status === 'done';
+      const bDone = b.status === 'done';
+
+      // 👉 done всегда вниз
+      if (aDone && !bDone) return 1;
+      if (!aDone && bDone) return -1;
+
+      // 👉 остальная сортировка
+      if (query.sort === TaskSort.OLDEST) {
+        return a.id - b.id;
+      }
+      return b.id - a.id;
+    });
 
     // 🌳 строим дерево
     const tree = this.buildTaskTree(flatItems);
